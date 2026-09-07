@@ -42,19 +42,19 @@ sudo apt update && sudo apt install ffmpeg
 ### Вариант 1: Через pip (рекомендуется)
 
 ```bash
-pip install git+https://github.com/motattack/mtslinker.git
+pip install git+https://github.com/VicadP/mtslinker.git
 ```
 
 ### Вариант 2: Через poetry
 
 ```bash
-poetry add git+https://github.com/motattack/mtslinker.git
+poetry add git+https://github.com/VicadP/mtslinker.git
 ```
 
 ### Вариант 3: Ручная установка из репозитория
 
 ```bash
-git clone https://github.com/motattack/mtslinker.git
+git clone https://github.com/VicadP/mtslinker.git
 cd mtslinker
 pip install -r requirements.txt
 pip install .
@@ -73,7 +73,7 @@ pip install .
 3. Перейдите во вкладку **Application** → **Cookies** → `https://my.mts-link.ru`
 4. Найдите cookie с именем `sessionId` и скопируйте его значение
 
-📹 [Видеоинструкция](https://raw.githubusercontent.com/motattack/mtslinker/refs/heads/master/get_sessionId.mp4)
+📹 [Видеоинструкция](https://raw.githubusercontent.com/VicadP/mtslinker/refs/heads/master/get_sessionId.mp4)
 
 ### Шаг 2: Запуск скачивания
 
