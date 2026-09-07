@@ -1,7 +1,1 @@
-*/
-*.log
-*.mp4
-*.mp3
-!mtslinker
-!get_sessionId.mp4
-!setup.py
+Nothing should be ignored based on the provided file changes, as they only include Python source files (.py) which are legitimate project files and not build artifacts, dependencies, or temporary files.

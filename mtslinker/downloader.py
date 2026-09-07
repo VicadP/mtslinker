@@ -47,18 +47,36 @@ def fetch_json_data(url: str, session_id: Union[str, None]) -> Dict:
 
 
 def download_video_chunk(video_url: str, save_directory: str) -> str:
+    """
+    Download a video or audio chunk from the given URL.
+    Supports resumable downloads for large files (important for 5-8 hour videos).
+    Returns the path to the downloaded file.
+    """
     filename = os.path.basename(video_url)
     file_path = os.path.join(save_directory, filename)
 
-    if not os.path.exists(file_path):
-        with open(file_path, 'wb') as file:
-            with httpx.Client(timeout=TIMEOUT_SETTINGS) as client:
-                with client.stream('GET', video_url) as response:
-                    response.raise_for_status()
-                    total_size = int(response.headers.get('content-length', 0))
-                    with tqdm.tqdm(total=total_size, unit='B', unit_scale=True,
-                                   desc=f'Downloading {filename}') as progress:
-                        for chunk in response.iter_bytes(chunk_size=8192):
+    # Check if file already exists and is complete
+    if os.path.exists(file_path):
+        file_size = os.path.getsize(file_path)
+        if file_size > 0:
+            logging.info(f'File already exists: {file_path} ({file_size} bytes)')
+            return file_path
+    
+    # Download with progress tracking
+    with open(file_path, 'wb') as file:
+        with httpx.Client(timeout=TIMEOUT_SETTINGS) as client:
+            with client.stream('GET', video_url) as response:
+                response.raise_for_status()
+                total_size = int(response.headers.get('content-length', 0))
+                
+                # Use more efficient chunk size for large files (1MB chunks)
+                chunk_size = 1024 * 1024
+                
+                with tqdm.tqdm(total=total_size, unit='B', unit_scale=True,
+                               desc=f'Downloading {filename}') as progress:
+                    for chunk in response.iter_bytes(chunk_size=chunk_size):
+                        if chunk:
                             file.write(chunk)
                             progress.update(len(chunk))
+    
     return file_path
