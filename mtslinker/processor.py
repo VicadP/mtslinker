@@ -5,13 +5,6 @@ from typing import Dict, Tuple, List, Union, Optional
 from pathlib import Path
 import tempfile
 
-import numpy as np
-from moviepy.audio.AudioClip import AudioArrayClip, CompositeAudioClip
-from moviepy.audio.io.AudioFileClip import AudioFileClip
-from moviepy.video.VideoClip import ColorClip, VideoClip
-from moviepy.video.io.VideoFileClip import VideoFileClip
-from moviepy import concatenate_videoclips, CompositeVideoClip
-
 import warnings
 warnings.simplefilter("ignore")
 
@@ -143,14 +136,13 @@ def process_video_clips(directory: str, json_data: Dict) -> Tuple[float, List[Di
     return total_duration, clips_info
 
 
-def create_video_with_gaps(total_duration: float, clips_info: List[Dict]) -> CompositeVideoClip:
+def create_video_with_gaps(total_duration: float, clips_info: List[Dict]) -> str:
     """
-    Create a composite video with proper timing from clip info dictionaries.
+    Создать временный видеофайл с правильным таймингом используя FFmpeg.
+    Возвращает путь к временному файлу.
     Handles both video-only and audio-only clips properly.
-    Uses precise timing to ensure A/V sync for long videos (5-8 hours).
+    Оптимизировано для длинных видео (5-8 часов) через прямое использование FFmpeg.
     """
-    clips = []
-    
     # Sort clips by start time to ensure correct order
     sorted_clips = sorted(clips_info, key=lambda x: x['start_time'])
     
@@ -163,62 +155,156 @@ def create_video_with_gaps(total_duration: float, clips_info: List[Dict]) -> Com
             max_width = max(max_width, clip_info.get('width', 1920))
             max_height = max(max_height, clip_info.get('height', 1080))
     
-    for clip_info in sorted_clips:
-        start_time = clip_info['start_time']
-        file_path = clip_info['path']
+    # Filter only video clips
+    video_clips = [c for c in sorted_clips if c['has_video']]
+    
+    if not video_clips:
+        # No video clips, create black screen using FFmpeg
+        logging.info('No video clips found, creating black background with FFmpeg')
+        temp_video_path = os.path.join(os.path.dirname(clips_info[0]['path']), 'black_video.mp4')
         
-        if clip_info['has_video']:
-            # Load video clip with precise timing
-            video_clip = VideoFileClip(file_path)
-            video_clip = video_clip.with_start(start_time)
-            clips.append(video_clip)
+        # Generate black video with FFmpeg
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'lavfi',
+            '-i', f'color=c=black:s={max_width}x{max_height}:d={total_duration}',
+            '-c:v', 'libx264',
+            '-preset', 'medium',
+            '-pix_fmt', 'yuv420p',
+            temp_video_path
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return temp_video_path
     
-    if not clips:
-        # No video clips, create black screen
-        logging.info('No video clips found, creating black background')
-        black_clip = ColorClip(size=(max_width, max_height), color=(0, 0, 0), duration=total_duration)
-        return CompositeVideoClip([black_clip.with_start(0)])
+    # Создаём чёрный фон на всю длительность
+    temp_dir = os.path.dirname(video_clips[0]['path'])
+    bg_video = os.path.join(temp_dir, 'background.mp4')
     
-    # Create composite video with proper size and duration
-    final_video = CompositeVideoClip(clips, size=(max_width, max_height))
-    final_video = final_video.with_duration(total_duration)
+    cmd = [
+        'ffmpeg', '-y',
+        '-f', 'lavfi',
+        '-i', f'color=c=black:s={max_width}x{max_height}:d={total_duration}',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        bg_video
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
     
-    logging.info(f'Final video duration: {final_video.duration}, size: {max_width}x{max_height}')
-    return final_video
+    # Создаем финальное видео через FFmpeg с overlay и enable=between
+    temp_video_path = os.path.join(temp_dir, 'temp_video_track.mp4')
+    
+    # Строим filter_complex с использованием enable=between для каждого клипа
+    inputs = ['-i', bg_video]
+    filter_parts = ['[0:v]']
+    
+    for i, clip_info in enumerate(video_clips):
+        file_path = clip_info['path']
+        start_time = clip_info['start_time']
+        duration = clip_info['duration']
+        end_time = start_time + duration
+        
+        inputs.extend(['-i', file_path])
+        
+        if i == 0:
+            # Первый клип накладываем на фон
+            filter_parts.append(f'[{i+1}:v]overlay=enable=\'between(t,{start_time},{end_time})\'[out{i}]')
+        else:
+            # Последующие клипы накладываем на предыдущий результат
+            filter_parts.append(f'[{i-1}out{i-1}][{i+1}:v]overlay=enable=\'between(t,{start_time},{end_time})\'[out{i}]')
+    
+    filter_complex = ';'.join(filter_parts[:-1]) + ';' + filter_parts[-1].split('[')[-1]
+    final_map = filter_parts[-1].split('[')[-1].rstrip(']')
+    
+    cmd = ['ffmpeg', '-y'] + inputs + [
+        '-filter_complex', filter_complex,
+        '-map', f'[{final_map}]',
+        '-c:v', 'libx264',
+        '-preset', 'medium',
+        '-pix_fmt', 'yuv420p',
+        temp_video_path
+    ]
+    
+    logging.info(f'Создание видео дорожки через FFmpeg ({len(video_clips)} клипов)...')
+    subprocess.run(cmd, check=True, capture_output=True)
+    
+    # Очищаем фон
+    if os.path.exists(bg_video):
+        os.remove(bg_video)
+    
+    logging.info(f'Видео дорожка создана: {temp_video_path}')
+    return temp_video_path
 
 
-def create_audio_with_gaps(total_duration: float, clips_info: List[Dict]) -> CompositeAudioClip:
+def create_audio_with_gaps(total_duration: float, clips_info: List[Dict]) -> str:
     """
-    Create a composite audio track with proper timing from clip info dictionaries.
+    Создать временный аудиофайл с правильным таймингом используя FFmpeg.
+    Возвращает путь к временному файлу.
     Handles both audio-only and video-with-audio clips properly.
-    Uses precise timing to ensure A/V sync for long videos (5-8 hours).
+    Оптимизировано для длинных видео (5-8 часов) через прямое использование FFmpeg.
     """
-    audio_segments = []
-    
     # Sort clips by start time to ensure correct order
     sorted_clips = sorted(clips_info, key=lambda x: x['start_time'])
     
-    for clip_info in sorted_clips:
-        start_time = clip_info['start_time']
-        file_path = clip_info['path']
+    # Filter only audio clips
+    audio_clips = [c for c in sorted_clips if c['has_audio']]
+    
+    if not audio_clips:
+        # No audio clips, create silence using FFmpeg
+        logging.info('No audio clips found, creating silent audio track with FFmpeg')
+        temp_dir = os.path.dirname(clips_info[0]['path'])
+        temp_audio_path = os.path.join(temp_dir, 'silent_audio.aac')
         
-        if clip_info['has_audio']:
-            # Load audio clip with precise timing
-            audio_clip = AudioFileClip(file_path)
-            audio_clip = audio_clip.with_start(start_time)
-            audio_segments.append(audio_clip)
+        # Generate silence with FFmpeg
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'lavfi',
+            '-i', f'anullsrc=r=44100:cl=stereo:d={total_duration}',
+            '-c:a', 'aac',
+            temp_audio_path
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        return temp_audio_path
     
-    if not audio_segments:
-        # No audio clips, create silence
-        logging.info('No audio clips found, creating silent audio track')
-        silence = AudioArrayClip(np.zeros((int(total_duration * 44100), 2)), fps=44100)
-        return CompositeAudioClip([silence.with_start(0)])
+    # Создаем финальное аудио через FFmpeg
+    temp_dir = os.path.dirname(audio_clips[0]['path'])
+    temp_audio_path = os.path.join(temp_dir, 'temp_audio_track.aac')
     
-    final_audio = CompositeAudioClip(audio_segments)
-    final_audio = final_audio.with_duration(total_duration)
+    # Используем фильтр для создания аудио дорожки с правильным timing
+    filter_complex_parts = []
+    inputs = []
     
-    logging.info(f'Total audio duration: {final_audio.duration}')
-    return final_audio
+    # Создаем тихий фон на всю длительность
+    inputs.extend(['-f', 'lavfi', '-i', f'anullsrc=r=44100:cl=stereo:d={total_duration}'])
+    
+    # Накладываем каждый аудио клип в правильное время
+    for i, clip_info in enumerate(audio_clips):
+        file_path = clip_info['path']
+        start_time = clip_info['start_time']
+        inputs.extend(['-i', file_path])
+        filter_complex_parts.append(
+            f'[{i+1}:a]asetpts=PTS-STARTPTS+{start_time}[a{i}]'
+        )
+    
+    # Объединяем все аудио дорожки
+    if filter_complex_parts:
+        mix_inputs = '+'.join([f'[a{i}]' for i in range(len(audio_clips))])
+        filter_complex_parts.append(f'[0:a]{mix_inputs}amix=inputs={len(audio_clips)+1}:duration=first:dropout_transition=0[outa]')
+    
+    filter_complex = ';'.join(filter_complex_parts)
+    
+    cmd = ['ffmpeg', '-y'] + inputs + [
+        '-filter_complex', filter_complex,
+        '-map', '[outa]',
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        temp_audio_path
+    ]
+    
+    logging.info(f'Создание аудио дорожки через FFmpeg ({len(audio_clips)} клипов)...')
+    subprocess.run(cmd, check=True, capture_output=True)
+    
+    logging.info(f'Аудио дорожка создана: {temp_audio_path}')
+    return temp_audio_path
 
 
 def compile_final_video(total_duration: float, clips_info: List[Dict],
@@ -226,35 +312,52 @@ def compile_final_video(total_duration: float, clips_info: List[Dict],
     """
     Compile final video from clip info dictionaries.
     Uses FFmpeg for efficient processing of long videos (5-8 hours).
+    Completely rewritten to avoid MoviePy bottlenecks.
     """
-    # Create video and audio tracks
-    video_result = create_video_with_gaps(total_duration, clips_info)
-
-    if any(c['has_audio'] for c in clips_info):
-        combined_audio = create_audio_with_gaps(total_duration, clips_info)
-        video_result = video_result.with_audio(combined_audio)
-
+    # Create video and audio tracks using FFmpeg
+    temp_video_path = create_video_with_gaps(total_duration, clips_info)
+    temp_audio_path = create_audio_with_gaps(total_duration, clips_info)
+    
+    # Apply max_duration limit if specified
     if max_duration:
-        if video_result.duration > max_duration:
-            logging.info(f'Duration limit! Cropping to {max_duration}s')
-            video_result = video_result.subclip(0, max_duration)
-
-    # Use more efficient encoding settings for long videos
-    video_result.write_videofile(
-        output_path,
-        codec='libx264',
-        audio_codec='aac',
-        preset='medium',  # Better compression than ultrafast, still reasonable speed
-        threads=os.cpu_count() or 4,
-        fps=video_result.fps if hasattr(video_result, 'fps') and video_result.fps else 30,
-        audio_fps=44100,
-        audio_nbytes=2,
-        temp_audiofile=output_path + '.temp.m4a',
-        remove_temp=True
-    )
+        logging.info(f'Applying duration limit: {max_duration}s')
+        total_duration = min(total_duration, max_duration)
+    
+    logging.info(f'Объединение видео и аудио дорожек через FFmpeg...')
+    
+    # Merge video and audio using FFmpeg
+    cmd = [
+        'ffmpeg', '-y',
+        '-i', temp_video_path,
+        '-i', temp_audio_path,
+        '-c:v', 'libx264',
+        '-preset', 'medium',
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        '-pix_fmt', 'yuv420p',
+        '-t', str(total_duration),
+        output_path
+    ]
+    
+    subprocess.run(cmd, check=True, capture_output=True)
+    logging.info(f'Финальное видео сохранено: {output_path}')
+    
+    # Clean up temporary files
+    cleanup_temp_files([temp_video_path, temp_audio_path])
     
     # Clean up downloaded chunks after successful compilation
     cleanup_downloaded_files(clips_info)
+
+
+def cleanup_temp_files(file_paths: List[str]):
+    """Remove temporary intermediate files."""
+    for file_path in file_paths:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logging.info(f'Cleaned up temporary file: {file_path}')
+            except Exception as e:
+                logging.warning(f'Failed to remove {file_path}: {e}')
 
 
 def cleanup_downloaded_files(clips_info: List[Dict]):
