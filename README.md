@@ -125,9 +125,104 @@ mtslinker --help
 
 ---
 
-## Использование в Python-проекте
+## 🚀 Простой способ: функция `download_webinar`
 
-Вы можете интегрировать `mtslinker` в свой проект, используя функцию `fetch_webinar_data`:
+Начиная с версии 1.0.0, mtslinker предоставляет удобную функцию-точку входа `download_webinar()`, которая позволяет скачать вебинар по URL в один вызов.
+
+### Использование через Python API
+
+```python
+from mtslinker import download_webinar
+
+# Базовый пример - скачивание в текущую директорию
+result = download_webinar(
+    url='https://my.mts-link.ru/12345678/987654321/record-new/123456789/record-file/1234567890'
+)
+print(f'Видео сохранено: {result}')
+
+# С указанием пути сохранения (файл)
+result = download_webinar(
+    url='https://my.mts-link.ru/12345678/987654321/record-new/123456789/record-file/1234567890',
+    output_path='/path/to/my_video.mp4'
+)
+
+# С указанием директории для сохранения
+result = download_webinar(
+    url='https://my.mts-link.ru/12345678/987654321/record-new/123456789/record-file/1234567890',
+    output_path='/path/to/folder'
+)
+# Файл будет сохранён как: /path/to/folder/{название_вебинара}.mp4
+
+# С приватным доступом и ограничением длительности
+result = download_webinar(
+    url='https://my.mts-link.ru/12345678/987654321/record-new/123456789/record-file/1234567890',
+    output_path='/videos/webinar.mp4',
+    session_id='a1b2c3d4e5f6',
+    max_duration=3600  # Обрезать видео до 1 часа
+)
+```
+
+### Параметры функции
+
+| Параметр | Тип | Обязательный | Описание |
+|----------|-----|--------------|----------|
+| `url` | str | ✅ Да | URL вебинара MTS Link |
+| `output_path` | str | ❌ Нет | Путь сохранения (файл или директория). По умолчанию — папка с именем вебинара в текущей директории |
+| `session_id` | str | ❌ Нет | Токен sessionId для приватных записей |
+| `max_duration` | int | ❌ Нет | Максимальная длительность видео в секундах (для обрезки) |
+
+### Возвращаемое значение
+
+- **При успехе**: полный путь к сохранённому файлу (str)
+- **При ошибке**: `None`
+
+### Примеры для разных сценариев
+
+#### Быстрая встреча (без record_id)
+```python
+from mtslinker import download_webinar
+
+result = download_webinar(
+    url='https://my.mts-link.ru/12345678/987654321/record-new/123456789'
+)
+```
+
+#### Приватный вебинар
+```python
+from mtslinker import download_webinar
+
+result = download_webinar(
+    url='https://my.mts-link.ru/12345678/987654321/record-new/123456789/record-file/1234567890',
+    session_id='a1b2c3d4e5f6',
+    output_path='/private/webinars/secret.mp4'
+)
+```
+
+#### Массовая загрузка
+```python
+from mtslinker import download_webinar
+
+urls = [
+    'https://my.mts-link.ru/.../record-new/111',
+    'https://my.mts-link.ru/.../record-new/222',
+    'https://my.mts-link.ru/.../record-new/333',
+]
+
+for url in urls:
+    result = download_webinar(url, output_path='/batch/downloads')
+    if result:
+        print(f'✅ Успешно: {result}')
+    else:
+        print(f'❌ Ошибка: {url}')
+```
+
+---
+
+## Использование в Python-проекте (устаревший API)
+
+> ⚠️ **Примечание**: Функция `fetch_webinar_data()` считается устаревшей. Рекомендуется использовать `download_webinar()`.
+
+Если вы используете старый API:
 
 ```python
 from mtslinker.webinar import fetch_webinar_data

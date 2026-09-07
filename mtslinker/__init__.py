@@ -9,8 +9,9 @@ This package provides functionality to:
 """
 
 from mtslinker.utils import initialize_logger
+from mtslinker.webinar import download_webinar, fetch_webinar_data
 
 initialize_logger()
 
 __version__ = '1.0.0'
-__all__ = ['fetch_webinar_data', 'initialize_logger']
+__all__ = ['download_webinar', 'fetch_webinar_data', 'initialize_logger']
