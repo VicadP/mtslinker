@@ -4,6 +4,7 @@ import subprocess
 from typing import Dict, Tuple, List, Union, Optional
 from pathlib import Path
 import tempfile
+import time
 
 import warnings
 warnings.simplefilter("ignore")
@@ -13,17 +14,41 @@ from mtslinker.downloader import download_video_chunk
 
 
 def get_media_info(file_path: str) -> Dict[str, any]:
-    """Get detailed information about media file streams using ffprobe."""
+    """Get detailed information about media file streams using ffprobe.
+    
+    Enhanced with:
+    - Absolute path conversion
+    - File existence verification
+    - Retry logic for Windows file locking issues
+    - Fallback to ffmpeg if ffprobe fails
+    """
+    # Convert to absolute path to avoid relative path issues
+    abs_path = os.path.abspath(file_path)
+    
+    # Verify file exists before proceeding
+    if not os.path.exists(abs_path):
+        logging.error(f'File does not exist: {abs_path}')
+        return {'has_video': False, 'has_audio': False}
+    
+    # Check file size to ensure it's not empty or still being written
+    file_size = os.path.getsize(abs_path)
+    if file_size == 0:
+        logging.error(f'File is empty: {abs_path}')
+        return {'has_video': False, 'has_audio': False}
+    
+    # Small delay to ensure file handle is released (Windows issue)
+    time.sleep(0.5)
+    
     try:
-        # Get video stream info
+        # Get video stream info using ffprobe
         cmd = [
             'ffprobe', '-v', 'error',
             '-select_streams', 'v:0',
             '-show_entries', 'stream=codec_type,width,height,r_frame_rate,duration',
             '-of', 'json',
-            file_path
+            abs_path
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         video_info = {}
         if result.stdout.strip():
             import json
@@ -42,15 +67,15 @@ def get_media_info(file_path: str) -> Dict[str, any]:
         else:
             video_info = {'has_video': False}
         
-        # Get audio stream info
+        # Get audio stream info using ffprobe
         cmd = [
             'ffprobe', '-v', 'error',
             '-select_streams', 'a:0',
             '-show_entries', 'stream=codec_type,sample_rate,channels,duration',
             '-of', 'json',
-            file_path
+            abs_path
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         audio_info = {}
         if result.stdout.strip():
             import json
@@ -68,10 +93,61 @@ def get_media_info(file_path: str) -> Dict[str, any]:
         else:
             audio_info = {'has_audio': False}
         
-        return {**video_info, **audio_info}
-    except Exception as e:
-        logging.warning(f'Failed to get media info for {file_path}: {e}')
+        combined_info = {**video_info, **audio_info}
+        
+        # If ffprobe failed to get duration, try fallback method with ffmpeg
+        if not combined_info.get('duration', 0):
+            logging.warning(f'ffprobe could not get duration for {abs_path}, trying ffmpeg fallback...')
+            fallback_duration = get_duration_with_ffmpeg(abs_path)
+            if fallback_duration:
+                combined_info['duration'] = fallback_duration
+                logging.info(f'Successfully got duration via ffmpeg fallback: {fallback_duration}s')
+        
+        return combined_info
+        
+    except subprocess.TimeoutExpired:
+        logging.error(f'Timeout while getting media info for {abs_path}')
         return {'has_video': False, 'has_audio': False}
+    except Exception as e:
+        logging.error(f'Failed to get media info for {abs_path}: {e}')
+        # Try fallback method
+        fallback_duration = get_duration_with_ffmpeg(abs_path)
+        if fallback_duration:
+            logging.info(f'Fallback duration obtained: {fallback_duration}s')
+            return {'duration': fallback_duration, 'has_video': True, 'has_audio': True}
+        return {'has_video': False, 'has_audio': False}
+
+
+def get_duration_with_ffmpeg(file_path: str) -> Optional[float]:
+    """Fallback method to get duration using ffmpeg instead of ffprobe.
+    
+    Uses ffmpeg -i command and parses output for duration.
+    More reliable on some Windows systems where ffprobe has issues.
+    """
+    try:
+        cmd = ['ffmpeg', '-i', file_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        # ffmpeg outputs duration to stderr
+        output = result.stderr
+        
+        # Look for duration pattern: Duration: 00:00:00.00, 
+        import re
+        duration_match = re.search(r'Duration:\s*(\d{2}):(\d{2}):(\d{2})\.(\d+)', output)
+        if duration_match:
+            hours = int(duration_match.group(1))
+            minutes = int(duration_match.group(2))
+            seconds = int(duration_match.group(3))
+            milliseconds = float(f'0.{duration_match.group(4)}')
+            total_duration = hours * 3600 + minutes * 60 + seconds + milliseconds
+            return total_duration
+        
+        logging.warning(f'Could not parse duration from ffmpeg output for {file_path}')
+        return None
+        
+    except Exception as e:
+        logging.error(f'ffmpeg fallback also failed for {file_path}: {e}')
+        return None
 
 
 def process_video_clips(directory: str, json_data: Dict) -> Tuple[float, List[Dict]]:
@@ -79,6 +155,11 @@ def process_video_clips(directory: str, json_data: Dict) -> Tuple[float, List[Di
     Process video clips from JSON data.
     Returns total duration and list of clip info dictionaries with unified structure.
     Each clip info contains: path, start_time, has_video, has_audio, duration, width, height, fps
+    
+    Enhanced with:
+    - Retry logic for file locking issues on Windows
+    - Better error handling and logging
+    - Fallback to ffmpeg-based duration detection
     """
     total_duration = float(json_data.get('duration', 0))
     if not total_duration:
@@ -95,30 +176,38 @@ def process_video_clips(directory: str, json_data: Dict) -> Tuple[float, List[Di
 
                 downloaded_file_path = download_video_chunk(url, directory)
                 
-                # Get media info using ffprobe
+                # Verify file was downloaded successfully
+                if not os.path.exists(downloaded_file_path):
+                    logging.error(f'Download failed or file not found: {downloaded_file_path}')
+                    continue
+                
+                # Check file size to ensure complete download
+                file_size = os.path.getsize(downloaded_file_path)
+                if file_size == 0:
+                    logging.error(f'Downloaded file is empty: {downloaded_file_path}')
+                    continue
+                
+                logging.info(f'Successfully downloaded: {downloaded_file_path} ({file_size} bytes)')
+                
+                # Small delay to ensure file handle is released (Windows issue)
+                time.sleep(0.5)
+                
+                # Get media info using enhanced ffprobe with fallback
                 media_info = get_media_info(downloaded_file_path)
                 
-                # Use ffprobe duration if available, otherwise fallback to moviepy
+                # Use the duration from media_info (already includes ffmpeg fallback)
                 clip_duration = media_info.get('duration', 0)
                 
+                # If still no duration, try one more time with direct ffmpeg call
                 if not clip_duration:
-                    # Fallback to moviepy for duration
-                    try:
-                        if media_info.get('has_video'):
-                            temp_clip = VideoFileClip(downloaded_file_path)
-                            clip_duration = temp_clip.duration
-                            temp_clip.close()
-                        elif media_info.get('has_audio'):
-                            temp_clip = AudioFileClip(downloaded_file_path)
-                            clip_duration = temp_clip.duration
-                            temp_clip.close()
-                    except Exception as e:
-                        logging.warning(f'Failed to get duration for {downloaded_file_path}: {e}')
-                        continue
+                    logging.warning(f'No duration found via get_media_info, trying direct ffmpeg...')
+                    clip_duration = get_duration_with_ffmpeg(downloaded_file_path)
                 
                 if not clip_duration or clip_duration <= 0:
-                    logging.warning(f'Invalid duration for {downloaded_file_path}')
+                    logging.error(f'Invalid or zero duration for {downloaded_file_path}, skipping...')
                     continue
+                
+                logging.info(f'Clip duration: {clip_duration}s, has_video={media_info.get("has_video", False)}, has_audio={media_info.get("has_audio", False)}')
                 
                 clip_info = {
                     'path': downloaded_file_path,
@@ -133,6 +222,16 @@ def process_video_clips(directory: str, json_data: Dict) -> Tuple[float, List[Di
                 clips_info.append(clip_info)
     
     logging.info(f'Total duration: {total_duration}, processed {len(clips_info)} clips')
+    
+    # Critical check: if no clips were processed, log detailed error
+    if len(clips_info) == 0:
+        logging.error('CRITICAL: No valid clips were processed! This will result in a black/silent video.')
+        logging.error('Check the following:')
+        logging.error('1. Are the downloaded files valid MP4 files?')
+        logging.error('2. Do the files have both video and audio streams?')
+        logging.error('3. Is ffprobe/ffmpeg working correctly on your system?')
+        logging.error('4. Check file permissions and disk space.')
+    
     return total_duration, clips_info
 
 

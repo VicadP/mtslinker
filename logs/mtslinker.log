@@ -1,1 +1,3 @@
 07.09.2026 19:46:21 [INFO]: Total duration: 100.0, processed 0 clips
+07.09.2026 21:04:09 [ERROR]: File does not exist: /nonexistent/path/file.mp4
+07.09.2026 21:04:09 [ERROR]: File is empty: /tmp/tmpz0483d31.mp4
