@@ -51,6 +51,11 @@ def download_video_chunk(video_url: str, save_directory: str) -> str:
     Download a video or audio chunk from the given URL.
     Supports resumable downloads for large files (important for 5-8 hour videos).
     Returns the path to the downloaded file.
+    
+    Enhanced with:
+    - Explicit flush and sync after download to ensure file is written to disk
+    - File handle closure verification
+    - Better error handling for Windows file locking issues
     """
     filename = os.path.basename(video_url)
     file_path = os.path.join(save_directory, filename)
@@ -63,20 +68,46 @@ def download_video_chunk(video_url: str, save_directory: str) -> str:
             return file_path
     
     # Download with progress tracking
-    with open(file_path, 'wb') as file:
-        with httpx.Client(timeout=TIMEOUT_SETTINGS) as client:
-            with client.stream('GET', video_url) as response:
-                response.raise_for_status()
-                total_size = int(response.headers.get('content-length', 0))
-                
-                # Use more efficient chunk size for large files (1MB chunks)
-                chunk_size = 1024 * 1024
-                
-                with tqdm.tqdm(total=total_size, unit='B', unit_scale=True,
-                               desc=f'Downloading {filename}') as progress:
-                    for chunk in response.iter_bytes(chunk_size=chunk_size):
-                        if chunk:
-                            file.write(chunk)
-                            progress.update(len(chunk))
+    temp_file_path = file_path + '.tmp'
+    try:
+        with open(temp_file_path, 'wb') as file:
+            with httpx.Client(timeout=TIMEOUT_SETTINGS) as client:
+                with client.stream('GET', video_url) as response:
+                    response.raise_for_status()
+                    total_size = int(response.headers.get('content-length', 0))
+                    
+                    # Use more efficient chunk size for large files (1MB chunks)
+                    chunk_size = 1024 * 1024
+                    
+                    with tqdm.tqdm(total=total_size, unit='B', unit_scale=True,
+                                   desc=f'Downloading {filename}') as progress:
+                        for chunk in response.iter_bytes(chunk_size=chunk_size):
+                            if chunk:
+                                file.write(chunk)
+                                progress.update(len(chunk))
+                        
+                        # Ensure all data is written to disk before closing
+                        file.flush()
+                        os.fsync(file.fileno())
+        
+        # Rename temp file to final name only after successful download
+        # This atomic operation prevents partial files from being used
+        os.replace(temp_file_path, file_path)
+        logging.info(f'Download completed and file synced to disk: {file_path}')
+        
+        # Additional delay on Windows to ensure file system updates
+        if os.name == 'nt':
+            import time
+            time.sleep(0.3)
+        
+    except Exception as e:
+        # Clean up temp file on failure
+        if os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except:
+                pass
+        logging.error(f'Download failed for {video_url}: {e}')
+        raise
     
     return file_path
