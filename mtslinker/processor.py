@@ -21,6 +21,7 @@ def get_media_info(file_path: str) -> Dict[str, any]:
     - File existence verification
     - Retry logic for Windows file locking issues
     - Fallback to ffmpeg if ffprobe fails
+    - Proper encoding handling for non-ASCII paths (Windows Cyrillic)
     """
     # Convert to absolute path to avoid relative path issues
     abs_path = os.path.abspath(file_path)
@@ -28,6 +29,7 @@ def get_media_info(file_path: str) -> Dict[str, any]:
     # Verify file exists before proceeding
     if not os.path.exists(abs_path):
         logging.error(f'File does not exist: {abs_path}')
+        logging.error(f'File exists check returned False. Current working directory: {os.getcwd()}')
         return {'has_video': False, 'has_audio': False}
     
     # Check file size to ensure it's not empty or still being written
@@ -36,11 +38,14 @@ def get_media_info(file_path: str) -> Dict[str, any]:
         logging.error(f'File is empty: {abs_path}')
         return {'has_video': False, 'has_audio': False}
     
+    logging.info(f'File verified: {abs_path} (size: {file_size} bytes)')
+    
     # Small delay to ensure file handle is released (Windows issue)
     time.sleep(0.5)
     
     try:
         # Get video stream info using ffprobe
+        # Use shell=False and pass arguments as list for better Windows compatibility
         cmd = [
             'ffprobe', '-v', 'error',
             '-select_streams', 'v:0',
@@ -48,24 +53,55 @@ def get_media_info(file_path: str) -> Dict[str, any]:
             '-of', 'json',
             abs_path
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        logging.debug(f'Running ffprobe command: {" ".join(cmd)}')
+        
+        # On Windows, use creationflags to avoid console window popup
+        creationflags = 0
+        if os.name == 'nt':
+            creationflags = subprocess.CREATE_NO_WINDOW
+        
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            timeout=30,
+            creationflags=creationflags,
+            encoding='utf-8',
+            errors='replace'
+        )
+        
+        logging.debug(f'ffprobe return code: {result.returncode}')
+        logging.debug(f'ffprobe stdout: {result.stdout[:500] if result.stdout else "empty"}')
+        if result.stderr:
+            logging.debug(f'ffprobe stderr: {result.stderr[:500]}')
+        
         video_info = {}
-        if result.stdout.strip():
+        if result.returncode == 0 and result.stdout.strip():
             import json
-            data = json.loads(result.stdout)
-            if data.get('streams'):
-                stream = data['streams'][0]
-                video_info = {
-                    'has_video': True,
-                    'width': stream.get('width', 1920),
-                    'height': stream.get('height', 1080),
-                    'fps': stream.get('r_frame_rate', '30/1'),
-                    'duration': float(stream.get('duration', 0))
-                }
-            else:
+            try:
+                data = json.loads(result.stdout)
+                if data.get('streams'):
+                    stream = data['streams'][0]
+                    video_info = {
+                        'has_video': True,
+                        'width': stream.get('width', 1920),
+                        'height': stream.get('height', 1080),
+                        'fps': stream.get('r_frame_rate', '30/1'),
+                        'duration': float(stream.get('duration', 0))
+                    }
+                    logging.info(f'Video stream detected: {video_info["width"]}x{video_info["height"]}, duration={video_info["duration"]}s')
+                else:
+                    video_info = {'has_video': False}
+                    logging.warning(f'No video streams found in {abs_path}')
+            except json.JSONDecodeError as e:
+                logging.error(f'Failed to parse ffprobe JSON output: {e}')
                 video_info = {'has_video': False}
         else:
             video_info = {'has_video': False}
+            if result.returncode != 0:
+                logging.warning(f'ffprobe returned non-zero exit code {result.returncode} for video stream')
+            if not result.stdout.strip():
+                logging.warning(f'ffprobe produced no stdout output for video stream')
         
         # Get audio stream info using ffprobe
         cmd = [
@@ -75,23 +111,43 @@ def get_media_info(file_path: str) -> Dict[str, any]:
             '-of', 'json',
             abs_path
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            timeout=30,
+            creationflags=creationflags,
+            encoding='utf-8',
+            errors='replace'
+        )
+        
         audio_info = {}
-        if result.stdout.strip():
+        if result.returncode == 0 and result.stdout.strip():
             import json
-            data = json.loads(result.stdout)
-            if data.get('streams'):
-                stream = data['streams'][0]
-                audio_info = {
-                    'has_audio': True,
-                    'sample_rate': int(stream.get('sample_rate', 44100)),
-                    'channels': int(stream.get('channels', 2)),
-                    'duration': float(stream.get('duration', 0))
-                }
-            else:
+            try:
+                data = json.loads(result.stdout)
+                if data.get('streams'):
+                    stream = data['streams'][0]
+                    audio_info = {
+                        'has_audio': True,
+                        'sample_rate': int(stream.get('sample_rate', 44100)),
+                        'channels': int(stream.get('channels', 2)),
+                        'duration': float(stream.get('duration', 0))
+                    }
+                    logging.info(f'Audio stream detected: {audio_info["sample_rate"]}Hz, duration={audio_info["duration"]}s')
+                else:
+                    audio_info = {'has_audio': False}
+                    logging.warning(f'No audio streams found in {abs_path}')
+            except json.JSONDecodeError as e:
+                logging.error(f'Failed to parse ffprobe JSON output for audio: {e}')
                 audio_info = {'has_audio': False}
         else:
             audio_info = {'has_audio': False}
+            if result.returncode != 0:
+                logging.warning(f'ffprobe returned non-zero exit code {result.returncode} for audio stream')
+            if not result.stdout.strip():
+                logging.warning(f'ffprobe produced no stdout output for audio stream')
         
         combined_info = {**video_info, **audio_info}
         
@@ -110,6 +166,7 @@ def get_media_info(file_path: str) -> Dict[str, any]:
         return {'has_video': False, 'has_audio': False}
     except Exception as e:
         logging.error(f'Failed to get media info for {abs_path}: {e}')
+        logging.error(f'Exception type: {type(e).__name__}')
         # Try fallback method
         fallback_duration = get_duration_with_ffmpeg(abs_path)
         if fallback_duration:
@@ -123,13 +180,33 @@ def get_duration_with_ffmpeg(file_path: str) -> Optional[float]:
     
     Uses ffmpeg -i command and parses output for duration.
     More reliable on some Windows systems where ffprobe has issues.
+    Enhanced with:
+    - Proper encoding handling for non-ASCII paths (Windows Cyrillic)
+    - Creation flags for Windows
+    - Better error logging
     """
     try:
+        # On Windows, use creationflags to avoid console window popup
+        creationflags = 0
+        if os.name == 'nt':
+            creationflags = subprocess.CREATE_NO_WINDOW
+        
         cmd = ['ffmpeg', '-i', file_path]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        logging.debug(f'Running ffmpeg command: {" ".join(cmd)}')
+        
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            timeout=30,
+            creationflags=creationflags,
+            encoding='utf-8',
+            errors='replace'
+        )
         
         # ffmpeg outputs duration to stderr
         output = result.stderr
+        logging.debug(f'ffmpeg output (first 500 chars): {output[:500] if output else "empty"}')
         
         # Look for duration pattern: Duration: 00:00:00.00, 
         import re
@@ -140,13 +217,16 @@ def get_duration_with_ffmpeg(file_path: str) -> Optional[float]:
             seconds = int(duration_match.group(3))
             milliseconds = float(f'0.{duration_match.group(4)}')
             total_duration = hours * 3600 + minutes * 60 + seconds + milliseconds
+            logging.info(f'Successfully parsed duration via ffmpeg: {total_duration}s')
             return total_duration
         
         logging.warning(f'Could not parse duration from ffmpeg output for {file_path}')
+        logging.warning(f'ffmpeg return code: {result.returncode}')
         return None
         
     except Exception as e:
         logging.error(f'ffmpeg fallback also failed for {file_path}: {e}')
+        logging.error(f'Exception type: {type(e).__name__}')
         return None
 
 

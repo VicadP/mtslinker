@@ -1,3 +1,18 @@
 07.09.2026 19:46:21 [INFO]: Total duration: 100.0, processed 0 clips
 07.09.2026 21:04:09 [ERROR]: File does not exist: /nonexistent/path/file.mp4
 07.09.2026 21:04:09 [ERROR]: File is empty: /tmp/tmpz0483d31.mp4
+07.09.2026 21:16:26 [INFO]: File verified: /workspace/test_video.mp4 (size: 51973 bytes)
+07.09.2026 21:16:26 [INFO]: Video stream detected: 320x240, duration=5.0s
+07.09.2026 21:16:26 [INFO]: Audio stream detected: 44100Hz, duration=5.0s
+07.09.2026 21:16:34 [INFO]: File verified: /workspace/тест_директория/видео.mp4 (size: 32272 bytes)
+07.09.2026 21:16:34 [INFO]: Video stream detected: 320x240, duration=3.0s
+07.09.2026 21:16:35 [INFO]: Audio stream detected: 44100Hz, duration=3.0s
+07.09.2026 21:17:08 [INFO]: HTTP Request: GET https://www.w3schools.com/html/mov_bbb.mp4 "HTTP/1.1 403 Forbidden"
+07.09.2026 21:17:08 [ERROR]: Download failed for https://www.w3schools.com/html/mov_bbb.mp4: Client error '403 Forbidden' for url 'https://www.w3schools.com/html/mov_bbb.mp4'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/403
+07.09.2026 21:17:17 [INFO]: File verified: /tmp/tmplhmmgvrf/test_video.mp4 (size: 52760 bytes)
+07.09.2026 21:17:17 [INFO]: Video stream detected: 640x480, duration=5.0s
+07.09.2026 21:17:17 [INFO]: Audio stream detected: 44100Hz, duration=5.0s
+07.09.2026 21:18:04 [INFO]: File verified: /tmp/tmptie6wnb1/test.mp4 (size: 32692 bytes)
+07.09.2026 21:18:05 [INFO]: Video stream detected: 640x480, duration=3.0s
+07.09.2026 21:18:05 [INFO]: Audio stream detected: 44100Hz, duration=3.0s
