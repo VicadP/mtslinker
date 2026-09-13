@@ -373,38 +373,52 @@ def create_video_with_gaps(total_duration: float, clips_info: List[Dict]) -> str
     temp_video_path = os.path.join(temp_dir, 'temp_video_track.mp4')
     
     # Строим filter_complex с использованием enable=between для каждого клипа
-    inputs = ['-i', bg_video]
-    filter_parts = ['[0:v]']
+    inputs = ["-i", bg_video]
+    filter_parts = []
     
     for i, clip_info in enumerate(video_clips):
-        file_path = clip_info['path']
-        start_time = clip_info['start_time']
-        duration = clip_info['duration']
+        file_path = clip_info["path"]
+        start_time = clip_info["start_time"]
+        duration = clip_info["duration"]
         end_time = start_time + duration
         
-        inputs.extend(['-i', file_path])
+        inputs.extend(["-i", file_path])
         
         if i == 0:
             # Первый клип накладываем на фон
-            filter_parts.append(f'[{i+1}:v]overlay=enable=\'between(t,{start_time},{end_time})\'[out{i}]')
+            filter_parts.append(f"[0:v][{i+1}:v]overlay=enable='between(t,{start_time},{end_time})'[out{i}]")
         else:
             # Последующие клипы накладываем на предыдущий результат
-            filter_parts.append(f'[{i-1}out{i-1}][{i+1}:v]overlay=enable=\'between(t,{start_time},{end_time})\'[out{i}]')
+            filter_parts.append(f"[out{i-1}][{i+1}:v]overlay=enable='between(t,{start_time},{end_time})'[out{i}]")
     
-    filter_complex = ';'.join(filter_parts[:-1]) + ';' + filter_parts[-1].split('[')[-1]
-    final_map = filter_parts[-1].split('[')[-1].rstrip(']')
+    if not filter_parts:
+        # Если нет видео клипов, просто копируем черный фон
+        temp_video_path = bg_video
+        return temp_video_path
     
-    cmd = ['ffmpeg', '-y'] + inputs + [
-        '-filter_complex', filter_complex,
-        '-map', f'[{final_map}]',
-        '-c:v', 'libx264',
-        '-preset', 'medium',
-        '-pix_fmt', 'yuv420p',
+    filter_complex = ";".join(filter_parts)
+    final_map = f"[out{len(video_clips)-1}]"
+    
+    cmd = ["ffmpeg", "-y"] + inputs + [
+        "-filter_complex", filter_complex,
+        "-map", final_map,
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-pix_fmt", "yuv420p",
         temp_video_path
     ]
     
-    logging.info(f'Создание видео дорожки через FFmpeg ({len(video_clips)} клипов)...')
-    subprocess.run(cmd, check=True, capture_output=True)
+    logging.info(f"Создание видео дорожки через FFmpeg ({len(video_clips)} клипов)...")
+    logging.debug(f"FFmpeg command: {" ".join(cmd)}")
+    logging.debug(f"Filter complex: {filter_complex}")
+    
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        logging.error(f"FFmpeg failed with return code {e.returncode}")
+        logging.error(f"Stdout: {e.stdout}")
+        logging.error(f"Stderr: {e.stderr}")
+        raise
     
     # Очищаем фон
     if os.path.exists(bg_video):
