@@ -87,9 +87,9 @@ def get_media_info(file_path: str) -> Dict[str, any]:
                         'width': stream.get('width', 1920),
                         'height': stream.get('height', 1080),
                         'fps': stream.get('r_frame_rate', '30/1'),
-                        'duration': float(stream.get('duration', 0))
+                        'video_duration': float(stream.get('duration', 0))
                     }
-                    logging.info(f'Video stream detected: {video_info["width"]}x{video_info["height"]}, duration={video_info["duration"]}s')
+                    logging.info(f'Video stream detected: {video_info["width"]}x{video_info["height"]}, duration={video_info["video_duration"]}s')
                 else:
                     video_info = {'has_video': False}
                     logging.warning(f'No video streams found in {abs_path}')
@@ -133,9 +133,9 @@ def get_media_info(file_path: str) -> Dict[str, any]:
                         'has_audio': True,
                         'sample_rate': int(stream.get('sample_rate', 44100)),
                         'channels': int(stream.get('channels', 2)),
-                        'duration': float(stream.get('duration', 0))
+                        'audio_duration': float(stream.get('duration', 0))
                     }
-                    logging.info(f'Audio stream detected: {audio_info["sample_rate"]}Hz, duration={audio_info["duration"]}s')
+                    logging.info(f'Audio stream detected: {audio_info["sample_rate"]}Hz, duration={audio_info["audio_duration"]}s')
                 else:
                     audio_info = {'has_audio': False}
                     logging.warning(f'No audio streams found in {abs_path}')
@@ -152,11 +152,14 @@ def get_media_info(file_path: str) -> Dict[str, any]:
         combined_info = {**video_info, **audio_info}
         
         # If ffprobe failed to get duration, try fallback method with ffmpeg
-        if not combined_info.get('duration', 0):
+        if not combined_info.get('video_duration', 0) or not combined_info.get('audio_duration', 0):
             logging.warning(f'ffprobe could not get duration for {abs_path}, trying ffmpeg fallback...')
             fallback_duration = get_duration_with_ffmpeg(abs_path)
             if fallback_duration:
-                combined_info['duration'] = fallback_duration
+                if not combined_info.get('video_duration', 0):
+                    combined_info['video_duration'] = fallback_duration
+                if not combined_info.get('audio_duration', 0):
+                    combined_info['audio_duration'] = fallback_duration
                 logging.info(f'Successfully got duration via ffmpeg fallback: {fallback_duration}s')
         
         return combined_info
@@ -236,10 +239,10 @@ def process_video_clips(directory: str, json_data: Dict) -> Tuple[float, List[Di
     Returns total duration and list of clip info dictionaries with unified structure.
     Each clip info contains: path, start_time, has_video, has_audio, duration, width, height, fps
     
-    Enhanced with:
-    - Retry logic for file locking issues on Windows
-    - Better error handling and logging
-    - Fallback to ffmpeg-based duration detection
+    CRITICAL FIX FOR A/V SYNC:
+    - Gets separate durations for video and audio streams
+    - Uses min(video_duration, audio_duration) to ensure sync
+    - Stores both durations for precise trimming during merge
     """
     total_duration = float(json_data.get('duration', 0))
     if not total_duration:
@@ -275,24 +278,56 @@ def process_video_clips(directory: str, json_data: Dict) -> Tuple[float, List[Di
                 # Get media info using enhanced ffprobe with fallback
                 media_info = get_media_info(downloaded_file_path)
                 
-                # Use the duration from media_info (already includes ffmpeg fallback)
-                clip_duration = media_info.get('duration', 0)
+                # CRITICAL: Get separate video and audio durations
+                video_duration = media_info.get('video_duration', 0)
+                audio_duration = media_info.get('audio_duration', 0)
+                
+                # If ffprobe didn't return separate durations, use generic duration
+                if not video_duration:
+                    video_duration = media_info.get('duration', 0)
+                if not audio_duration:
+                    audio_duration = media_info.get('duration', 0)
                 
                 # If still no duration, try one more time with direct ffmpeg call
-                if not clip_duration:
-                    logging.warning(f'No duration found via get_media_info, trying direct ffmpeg...')
-                    clip_duration = get_duration_with_ffmpeg(downloaded_file_path)
+                if not video_duration:
+                    logging.warning(f'No video duration found, trying direct ffmpeg...')
+                    video_duration = get_duration_with_ffmpeg(downloaded_file_path)
+                if not audio_duration:
+                    logging.warning(f'No audio duration found, trying direct ffmpeg...')
+                    audio_duration = get_duration_with_ffmpeg(downloaded_file_path)
                 
-                if not clip_duration or clip_duration <= 0:
-                    logging.error(f'Invalid or zero duration for {downloaded_file_path}, skipping...')
+                if not video_duration or video_duration <= 0:
+                    logging.error(f'Invalid or zero video duration for {downloaded_file_path}, skipping...')
                     continue
                 
-                logging.info(f'Clip duration: {clip_duration}s, has_video={media_info.get("has_video", False)}, has_audio={media_info.get("has_audio", False)}')
+                # CRITICAL FIX: Use minimum of video and audio duration to ensure sync
+                # This prevents A/V drift when one stream is longer than the other
+                if video_duration > 0 and audio_duration > 0:
+                    sync_duration = min(video_duration, audio_duration)
+                    if abs(video_duration - audio_duration) > 0.5:
+                        logging.warning(
+                            f'A/V duration mismatch detected for {downloaded_file_path}: '
+                            f'video={video_duration:.2f}s, audio={audio_duration:.2f}s. '
+                            f'Using sync duration: {sync_duration:.2f}s'
+                        )
+                else:
+                    sync_duration = video_duration if video_duration > 0 else audio_duration
+                
+                if not sync_duration or sync_duration <= 0:
+                    logging.error(f'Invalid or zero sync duration for {downloaded_file_path}, skipping...')
+                    continue
+                
+                logging.info(
+                    f'Clip duration: {sync_duration:.2f}s (video: {video_duration:.2f}s, audio: {audio_duration:.2f}s), '
+                    f'has_video={media_info.get("has_video", False)}, has_audio={media_info.get("has_audio", False)}'
+                )
                 
                 clip_info = {
                     'path': downloaded_file_path,
                     'start_time': start_time,
-                    'duration': clip_duration,
+                    'duration': sync_duration,
+                    'video_duration': video_duration,
+                    'audio_duration': audio_duration,
                     'has_video': media_info.get('has_video', False),
                     'has_audio': media_info.get('has_audio', False),
                     'width': media_info.get('width', 1920),
@@ -372,7 +407,7 @@ def create_video_with_gaps(total_duration: float, clips_info: List[Dict]) -> str
     # Создаем финальное видео через FFmpeg с overlay и enable=between
     temp_video_path = os.path.join(temp_dir, 'temp_video_track.mp4')
     
-    # Строим filter_complex с использованием enable=between для каждого клипа
+    # Строим filter_complex с использованием trim + overlay + enable=between для каждого клипа
     inputs = ["-i", bg_video]
     filter_parts = []
     
@@ -384,12 +419,20 @@ def create_video_with_gaps(total_duration: float, clips_info: List[Dict]) -> str
         
         inputs.extend(["-i", file_path])
         
+        # CRITICAL FIX: Use trim filter to ensure exact duration matching
+        # This prevents A/V sync issues when video and audio have different lengths
         if i == 0:
-            # Первый клип накладываем на фон
-            filter_parts.append(f"[0:v][{i+1}:v]overlay=enable='between(t,{start_time},{end_time})'[out{i}]")
+            # Первый клип накладываем на фон с обрезкой по длительности
+            filter_parts.append(
+                f"[{i+1}:v]trim=0:{duration},setpts=PTS-STARTPTS[v{i}];"
+                f"[0:v][v{i}]overlay=enable='between(t,{start_time},{end_time})'[out{i}]"
+            )
         else:
-            # Последующие клипы накладываем на предыдущий результат
-            filter_parts.append(f"[out{i-1}][{i+1}:v]overlay=enable='between(t,{start_time},{end_time})'[out{i}]")
+            # Последующие клипы накладываем на предыдущий результат с обрезкой
+            filter_parts.append(
+                f"[{i+1}:v]trim=0:{duration},setpts=PTS-STARTPTS[v{i}];"
+                f"[out{i-1}][v{i}]overlay=enable='between(t,{start_time},{end_time})'[out{i}]"
+            )
     
     if not filter_parts:
         # Если нет видео клипов, просто копируем черный фон
@@ -469,13 +512,16 @@ def create_audio_with_gaps(total_duration: float, clips_info: List[Dict]) -> str
     # Создаем тихий фон на всю длительность
     inputs.extend(['-f', 'lavfi', '-i', f'anullsrc=r=44100:cl=stereo:d={total_duration}'])
     
-    # Накладываем каждый аудио клип в правильное время
+    # Накладываем каждый аудио клип в правильное время с обрезкой по длительности
     for i, clip_info in enumerate(audio_clips):
         file_path = clip_info['path']
         start_time = clip_info['start_time']
+        duration = clip_info['duration']  # CRITICAL: Use synced duration
         inputs.extend(['-i', file_path])
+        # CRITICAL FIX: Use atrim to ensure exact audio duration matching video
+        # This prevents A/V sync issues when audio is longer than video
         filter_complex_parts.append(
-            f'[{i+1}:a]asetpts=PTS-STARTPTS+{start_time}[a{i}]'
+            f'[{i+1}:a]atrim=0:{duration},asetpts=PTS-STARTPTS+{start_time}[a{i}]'
         )
     
     # Объединяем все аудио дорожки
